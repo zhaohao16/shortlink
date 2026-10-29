@@ -20,6 +20,8 @@ func TestValidateURL(t *testing.T) {
 		{"危险 scheme", "javascript:alert(1)", true},
 		{"file scheme", "file:///etc/passwd", true},
 		{"无 host", "https://", true},
+		{"空 hostname", "http://:8080/", true},
+		{"只有 userinfo", "http://user@:8080/", true},
 		{"超长", "https://example.com/" + strings.Repeat("a", 2100), true},
 	}
 	for _, c := range cases {

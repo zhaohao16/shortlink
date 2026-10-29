@@ -22,7 +22,8 @@ func validateURL(raw string) (string, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", errInvalidURL
 	}
-	if u.Host == "" {
+	// 用 Hostname 而非 Host：http://:8080/ 的 Host 非空但主机名是空的。
+	if u.Hostname() == "" {
 		return "", errInvalidURL
 	}
 	return u.String(), nil

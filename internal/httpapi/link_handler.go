@@ -69,7 +69,8 @@ func (h *LinkHandler) Create(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		slog.Error("create link failed", "url", u, "err", err)
+		// 不记完整 URL：query 里常带 token / 邮箱等敏感信息，靠 rid 关联即可。
+		slog.Error("create link failed", "url_len", len(u), "err", err)
 		abortWith(c, http.StatusInternalServerError, "INTERNAL", "internal error")
 		return
 	}

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"io/fs"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 )
@@ -16,7 +17,10 @@ func NewRouter(h *LinkHandler, webFS fs.FS) *gin.Engine {
 
 	r.POST("/api/v1/shorten", h.Create)
 	r.GET("/healthz", h.Healthz)
+	r.GET("/livez", h.Livez)
 	r.GET("/", serveIndex(webFS))
+	// 浏览器会自动请求 favicon，落到 NoRoute 会白白产生 404 与一行日志。
+	r.GET("/favicon.ico", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 
 	// 短码统一走 NoRoute：只有未被上面路由匹配的请求才会进入这里，
 	// 因此短链能保持最短形态 /aB3c9F，同时避免 gin 中 /:code 通配

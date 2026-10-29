@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -172,7 +173,10 @@ func TestRedirectAndRouteConflicts(t *testing.T) {
 		{"含非法字符", http.MethodGet, "/abc-12", http.StatusNotFound, ""},
 		{"不存在的短码", http.MethodGet, "/000000", http.StatusNotFound, ""},
 		{"API 不被短码吞掉", http.MethodGet, "/api/v1/shorten", http.StatusMethodNotAllowed, ""},
+		{"非 GET 打短码路径", http.MethodPost, "/" + code, http.StatusNotFound, ""},
 		{"健康检查不被吞掉", http.MethodGet, "/healthz", http.StatusOK, ""},
+		{"存活探针", http.MethodGet, "/livez", http.StatusOK, ""},
+		{"favicon 不产生 404", http.MethodGet, "/favicon.ico", http.StatusNoContent, ""},
 		{"首页", http.MethodGet, "/", http.StatusOK, ""},
 	}
 	for _, tc := range tests {
@@ -241,5 +245,54 @@ func TestRequestIDHeader(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if got := w.Header().Get("X-Request-Id"); got != "abc-123" {
 		t.Fatalf("X-Request-Id = %q", got)
+	}
+}
+
+// TestRequestIDSanitized 验证外部传入的非法/超长 request id 会被替换，避免日志被灌爆。
+func TestRequestIDSanitized(t *testing.T) {
+	r, _ := testRouter(t)
+	for _, bad := range []string{"has space", strings.Repeat("a", 200), "中文 id"} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		req.Header.Set("X-Request-Id", bad)
+		r.ServeHTTP(w, req)
+		got := w.Header().Get("X-Request-Id")
+		if got == bad || got == "" {
+			t.Fatalf("X-Request-Id %q not sanitized (got %q)", bad, got)
+		}
+	}
+}
+
+// flakyStore 前 N 次 Insert 强制返回 ErrDuplicate，用于覆盖路由层的重试兜底。
+type flakyStore struct {
+	*memStore
+	failFirst int
+}
+
+func (f *flakyStore) Insert(ctx context.Context, seq uint64, code, url string) error {
+	if f.failFirst > 0 {
+		f.failFirst--
+		return repo.ErrDuplicate
+	}
+	return f.memStore.Insert(ctx, seq, code, url)
+}
+
+// TestCreateRetriesOnDuplicateAtRouteLayer 是唯一性保障的最后一环：
+// 撞码必须重新取号重试并最终返回 201，而不是 500。
+func TestCreateRetriesOnDuplicateAtRouteLayer(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	g, err := idgen.New(context.Background(), rdb, "flaky:idgen", 10, 100000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &flakyStore{memStore: &memStore{rows: map[string]string{}}, failFirst: 2}
+	svc := service.NewLinkService(st, cache.NewLinkCache(rdb, time.Hour), g, "http://localhost:8080")
+	r := NewRouter(NewLinkHandler(svc, okDB{}, rdb),
+		fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("ok")}})
+
+	w := postJSON(r, "/api/v1/shorten", `{"url":"https://example.com/retry"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d body = %s", w.Code, w.Body)
 	}
 }

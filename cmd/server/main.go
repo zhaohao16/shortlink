@@ -75,9 +75,11 @@ func run() error {
 
 	svc := service.NewLinkService(repo.NewLinkRepo(db), cache.NewLinkCache(rdb, cfg.CacheTTL), gen, cfg.BaseURL)
 	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewRouter(httpapi.NewLinkHandler(svc, db, rdb), httpapi.WebFS()),
+		Addr:    cfg.HTTPAddr,
+		Handler: httpapi.NewRouter(httpapi.NewLinkHandler(svc, db, rdb), httpapi.WebFS()),
+		// ReadTimeout 限制整个请求的读取（含 body），防 Slowloris；请求体上限 4KB，10s 充裕。
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -99,5 +101,14 @@ func run() error {
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
 	slog.Info("shutting down")
-	return srv.Shutdown(shutdownCtx)
+
+	// 排空超时是可控的运维事件，不该伪装成崩溃（退出码 1）。
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			slog.Warn("graceful shutdown timed out, closing forcefully")
+			return nil
+		}
+		return err
+	}
+	return nil
 }

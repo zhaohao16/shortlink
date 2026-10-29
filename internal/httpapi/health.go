@@ -10,7 +10,13 @@ import (
 
 const healthTimeout = 2 * time.Second
 
-// Healthz 探测 MySQL 与 Redis，任一异常返回 503，供容器编排就绪判断。
+// Livez 是存活探针：只证明进程还能处理请求，不碰任何依赖。
+// 与 Healthz 分开，避免 Redis 故障时编排把仍在正常跳转的进程重启掉。
+func (h *LinkHandler) Livez(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// Healthz 是就绪探针：探测 MySQL 与 Redis，任一异常返回 503。
 func (h *LinkHandler) Healthz(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), healthTimeout)
 	defer cancel()
