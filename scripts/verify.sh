@@ -49,8 +49,9 @@ seq 1 1000 | xargs -P 32 -I@ curl -sS -o "$tmpd/@.json" \
   --data-binary '{"url":"https://example.com/concurrent/@"}'
 
 total=$(find "$tmpd" -name '*.json' | wc -l | tr -d ' ')
-ok=$(grep -l '"code":"' "$tmpd"/*.json 2>/dev/null | wc -l | tr -d ' ')
-uniq=$(grep -ho '"code":"[^"]*"' "$tmpd"/*.json 2>/dev/null | sort -u | wc -l | tr -d ' ')
+# 注意：set -o pipefail 下 grep 无匹配会返回 1，必须 || true 兜住，否则脚本会静默退出
+ok=$({ grep -l '"code":"' "$tmpd"/*.json 2>/dev/null || true; } | wc -l | tr -d ' ')
+uniq=$({ grep -ho '"code":"[^"]*"' "$tmpd"/*.json 2>/dev/null || true; } | sort -u | wc -l | tr -d ' ')
 echo "   total=$total created=$ok unique=$uniq"
 
 if [ "$ok" != "1000" ]; then
