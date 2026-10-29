@@ -2111,3 +2111,48 @@ git add scripts README.md && git commit -m "test: 端到端验收脚本与使用
 | Redis 全量丢失且 DB 为空 | 无影响 | `SEQ_START` 保证起点；有数据时用 `MAX(seq)` 兜底 |
 | 迁移脚本被改坏 | 启动失败 | `CREATE TABLE IF NOT EXISTS` 幂等，改表必须新增迁移文件，不复用 0001 |
 | 回滚 | — | 镜像按 tag 保留上一版；数据表只增不改，回滚旧镜像无需回滚 schema |
+
+---
+
+## 实施偏差记录
+
+执行本计划时与原稿的差异，以及每处的实测依据。
+
+| # | 计划原文 | 实际实现 | 原因 / 依据 |
+|---|---|---|---|
+| 1 | Go 1.24 + `golang:1.24-alpine` | go 1.27.3 + `golang:1.27-alpine` | 与本机 toolchain 对齐，避免工具链降级 |
+| 2 | `mysql:8.0` | `mysql:8.4` | 8.4 为 8.x LTS，`utf8mb4_0900_ai_ci` 支持不变 |
+| 3 | `migrations/`、`web/` 放仓库根 | `internal/store/migrations/`、`internal/httpapi/web/` | `go:embed` 只能嵌入当前包目录内文件，放根目录无法编译 |
+| 4 | `GET /api/v1/shorten` → 405 | 需显式 `r.HandleMethodNotAllowed = true` | 默认该请求会落到 `NoRoute` 变成 404；开启后与 `/{code}` 区分清晰 |
+| 5 | 请求体类型错误 → `INVALID_URL` | `INVALID_REQUEST` | 与「URL 内容非法」区分，前端提示更准确 |
+| 6 | 号段初值 `start` | `start-1` | 计数器语义是「已分配到的最大号」，否则首个短码会跳过 `SEQ_START` 浪费 1 个号 |
+| 7 | 仅靠客户端超时配置 | 客户端收紧 + `LinkCache`/`idgen` 各加 500ms 硬上限 | 实测 Redis 停机时一次跳转被拖到 **19.6s** 并被 `WriteTimeout` 掐断（`curl 52 Empty reply`）。修复后：跳转 `302 / 1.0s`、创建 `0.5s` |
+| 8 | 「Redis 停机 → 创建必 503」 | 号段缓冲内仍可创建（实测 `201 / 0.5s`），号段耗尽才 `503`（实测 `0.5s`） | 号段预分配的固有特性，属预期行为；用 `SEGMENT_SIZE=1` 的独立实例验证了 503 分支 |
+| 9 | 每任务单独提交 | T5/T6 合并、T7 单独、API 与前端合并 | `go:embed` 与路由互相依赖，强行拆分会产生不可编译的中间提交 |
+| 10 | 全部测试带 `-race` | 本机无 gcc，改在 `golang:1.27-alpine` 容器内 `apk add gcc musl-dev` 后执行 | 容器内 `-race` 全绿；顺带发现并修正 `TestTTLJitterApplied` 断言（抖动上限是 1.1×TTL，原断言 `≤1h` 过严） |
+
+### 实测结论（`docker compose` + MySQL 8.4 + Redis 7）
+
+```
+== 1. 健康检查      {"mysql":"ok","redis":"ok","status":"ok"}
+== 2. 创建短链      code=673Fs2
+== 3. 跳转          location=https://example.com/a/very/long/path?x=1&y=2
+== 4. 非法 URL 被拒 400
+== 5. 不存在的短码  404
+== 6. API 路径不被吞 405
+== 7. 并发 1000 条  total=1000 created=1000 unique=1000
+== ALL PASSED
+```
+
+补充验证项：
+
+| 场景 | 结果 |
+|---|---|
+| 空值缓存 | `link:000000` TTL=60s，值空串 |
+| 缓存被删后回源 | `DEL` 后请求 → 302，TTL 回填约 24h |
+| 运行用户 | `uid=10001(app)`，非 root |
+| 镜像体积 | 28.3 MB |
+| `compose down` 后再 `up` | 数据保留（4218 行），旧短码仍 302 |
+| nginx profile | 经 `:80` 反代 302，`/healthz` 正常 |
+| 重启后发号 | 日志 `idgen ready start=103208 db_max_seq=103207`，不回退不撞码 |
+
