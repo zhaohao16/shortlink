@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"sort"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -30,6 +33,7 @@ func OpenMySQL(ctx context.Context, dsn string) (*sql.DB, error) {
 	db.SetMaxOpenConns(50)
 	db.SetMaxIdleConns(10)
 	db.SetConnMaxLifetime(30 * time.Minute)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 
 	var lastErr error
 	for i := 0; i < mysqlPingAttempts; i++ {
@@ -51,14 +55,28 @@ func OpenMySQL(ctx context.Context, dsn string) (*sql.DB, error) {
 	return nil, fmt.Errorf("mysql not reachable: %w", lastErr)
 }
 
-// Migrate 执行幂等建表语句。表结构只增不改，变更必须新增迁移文件。
+// Migrate 按文件名顺序执行全部内嵌迁移。
+// 不做 schema_migrations 版本表（本期只有建表），因此每个迁移文件都必须自身幂等，
+// 例如 CREATE TABLE IF NOT EXISTS / ALTER TABLE ... ADD COLUMN IF NOT EXISTS。
 func Migrate(ctx context.Context, db *sql.DB) error {
-	body, err := migrationFS.ReadFile("migrations/0001_init.sql")
+	files, err := fs.Glob(migrationFS, "migrations/*.sql")
 	if err != nil {
-		return fmt.Errorf("read migration: %w", err)
+		return fmt.Errorf("glob migrations: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, string(body)); err != nil {
-		return fmt.Errorf("apply migration: %w", err)
+	if len(files) == 0 {
+		return errors.New("store: no migration files embedded")
+	}
+	sort.Strings(files)
+
+	for _, name := range files {
+		body, err := migrationFS.ReadFile(name)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", name, err)
+		}
+		if _, err := db.ExecContext(ctx, string(body)); err != nil {
+			return fmt.Errorf("apply %s: %w", name, err)
+		}
+		slog.Info("migration applied", "file", name)
 	}
 	return nil
 }
