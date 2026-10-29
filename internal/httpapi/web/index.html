@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>短链接</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+         font: 16px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         background: #0f1115; color: #e8eaed; padding: 24px; }
+  main { width: 100%; max-width: 560px; }
+  h1 { font-size: 28px; margin: 0 0 8px; letter-spacing: .5px; }
+  p.sub { margin: 0 0 28px; color: #8b93a1; font-size: 14px; }
+  form { display: flex; gap: 8px; }
+  input[type=url] { flex: 1; min-width: 0; padding: 12px 14px; border-radius: 10px;
+         border: 1px solid #2b313c; background: #171a21; color: inherit; font-size: 15px; }
+  input[type=url]:focus { outline: 2px solid #4c8dff; outline-offset: -1px; border-color: transparent; }
+  button { padding: 12px 20px; border: 0; border-radius: 10px; background: #4c8dff;
+         color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; white-space: nowrap;
+         transition: background .15s ease; }
+  button:hover:not(:disabled) { background: #3d7ce8; }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  #result { margin-top: 24px; padding: 16px; border-radius: 12px; background: #171a21;
+         border: 1px solid #2b313c; display: none; }
+  #result.show { display: block; }
+  #short { font-size: 20px; font-weight: 600; color: #6ea8ff; word-break: break-all;
+         text-decoration: none; display: inline-block; }
+  #short:hover { text-decoration: underline; }
+  #orig { font-size: 13px; color: #8b93a1; word-break: break-all; margin-top: 8px; }
+  .row { display: flex; gap: 12px; align-items: center; justify-content: space-between; }
+  .copy { padding: 6px 12px; font-size: 13px; background: #2b313c; }
+  .copy:hover:not(:disabled) { background: #39414f; }
+  #error { margin-top: 16px; color: #ff7a7a; font-size: 14px; min-height: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>短链接</h1>
+  <p class="sub">粘贴长链接，生成 6 位短码。</p>
+  <form id="f">
+    <input id="url" type="url" placeholder="https://example.com/very/long/url" required autocomplete="off" autofocus>
+    <button id="submit" type="submit">生成</button>
+  </form>
+  <div id="error"></div>
+  <div id="result">
+    <div class="row">
+      <a id="short" href="#" target="_blank" rel="noopener"></a>
+      <button class="copy" id="copy" type="button">复制</button>
+    </div>
+    <div id="orig"></div>
+  </div>
+</main>
+<script>
+const f = document.getElementById('f');
+const urlInput = document.getElementById('url');
+const submit = document.getElementById('submit');
+const result = document.getElementById('result');
+const shortA = document.getElementById('short');
+const orig = document.getElementById('orig');
+const errBox = document.getElementById('error');
+const copyBtn = document.getElementById('copy');
+
+f.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  errBox.textContent = '';
+  result.classList.remove('show');
+  const url = urlInput.value.trim();
+  if (!url) return;
+
+  submit.disabled = true;
+  submit.textContent = '生成中…';
+  try {
+    const res = await fetch('/api/v1/shorten', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      errBox.textContent = (data.error && data.error.message) || '生成失败（HTTP ' + res.status + '）';
+      return;
+    }
+    shortA.textContent = data.short_url;
+    shortA.href = data.short_url;
+    orig.textContent = data.url;
+    result.classList.add('show');
+  } catch (err) {
+    errBox.textContent = '网络错误，请重试';
+  } finally {
+    submit.disabled = false;
+    submit.textContent = '生成';
+  }
+});
+
+copyBtn.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(shortA.textContent);
+    copyBtn.textContent = '已复制';
+    setTimeout(() => { copyBtn.textContent = '复制'; }, 1500);
+  } catch {
+    errBox.textContent = '复制失败，请手动选择文本';
+  }
+});
+</script>
+</body>
+</html>

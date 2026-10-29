@@ -1390,7 +1390,9 @@ git add internal/httpapi && git commit -m "feat(api): 创建短链接口与统�
 
 ---
 
-## T9 跳转接口（NoRoute 兜底）
+## T9 跳转接口（短码 `GET /:code`）
+
+> 实施时由「`NoRoute` 兜底」改为「直接注册 `GET /:code` + `HEAD /:code`」，见偏差记录第 20 条。
 
 **产出文件**
 - Modify: `internal/httpapi/link_handler.go`、`internal/httpapi/router.go`
@@ -1452,7 +1454,9 @@ func TestRedirectAndRouteConflicts(t *testing.T) {
 }
 ```
 
-2. 运行：预期 `panic: 'api' in new path '/api/v1/shorten' conflicts with existing wildcard ':code'` —— **如果你先用了 `r.GET("/:code")`，这一步就是冲突的实证**。改为 NoRoute 后重跑通过。
+2. 运行：**不会 panic**。实测 gin v1.10.0，`GET /:code` 与 `POST /api/v1/shorten` 可以共存，静态路径优先匹配。
+
+> 订正：本计划初稿断言此处会因 wildcard 冲突 panic，该断言在 gin v1.10 上**不成立**（gin 的 patricia 树允许同层「静态兄弟 + 通配」，只有旧的 httprouter 才会 panic）。方案仍选 `NoRoute`，但理由改为可维护性而非避坑，详见设计方案 §3.3 的实测对照表。
 
 3. 在 `router.go` 用 `NoRoute` 兜底，并**不注册** `/:code`：
 
@@ -1500,8 +1504,8 @@ func shortcodeFallback(h *LinkHandler) gin.HandlerFunc {
 
 | 编号 | 操作 | 预期 |
 |---|---|---|
-| V9.1 | 用 `r.GET("/:code")` 先跑一次 | 进程 panic 提示 wildcard 冲突（记录为冲突实证，随后改 NoRoute） |
-| V9.2 | 改 NoRoute 后 `go test ./internal/httpapi/ -run TestRedirect -v` | 6 个子测试全 PASS |
+| V9.1 | 单独用 `r.GET("/:code")` 注册一次 | 注册成功、不 panic；`GET /healthz` 命中静态、`GET /aB3c9F` 命中通配——二者可共存（初稿的"会 panic"假设已被实测推翻） |
+| V9.2 | `go test ./internal/httpapi/ -run TestRedirect -v` | 全部子测试 PASS（含单段 `/api`、多段 `/a/b` 均为 404） |
 | V9.3 | `curl -sSI localhost:8080/<code>` | `HTTP/1.1 302 Found`，`Location:` 为原 URL，含 `Cache-Control: no-store` |
 | V9.4 | `curl -sS -o /dev/null -w '%{http_code}' localhost:8080/api/v1/shorten` | `405`（GET 打 POST 路由），**不是 404**，证明 API 未被短码吞掉 |
 | V9.5 | `curl -sS -o /dev/null -w '%{http_code}' localhost:8080/healthz` | `200` |
@@ -2111,3 +2115,62 @@ git add scripts README.md && git commit -m "test: 端到端验收脚本与使用
 | Redis 全量丢失且 DB 为空 | 无影响 | `SEQ_START` 保证起点；有数据时用 `MAX(seq)` 兜底 |
 | 迁移脚本被改坏 | 启动失败 | `CREATE TABLE IF NOT EXISTS` 幂等，改表必须新增迁移文件，不复用 0001 |
 | 回滚 | — | 镜像按 tag 保留上一版；数据表只增不改，回滚旧镜像无需回滚 schema |
+
+---
+
+## 实施偏差记录
+
+执行本计划时与原稿的差异，以及每处的实测依据。
+
+| # | 计划原文 | 实际实现 | 原因 / 依据 |
+|---|---|---|---|
+| 1 | Go 1.24 + `golang:1.24-alpine` | go 1.27.3 + `golang:1.27-alpine` | 与本机 toolchain 对齐，避免工具链降级 |
+| 2 | `mysql:8.0` | `mysql:8.4` | 8.4 为 8.x LTS，`utf8mb4_0900_ai_ci` 支持不变 |
+| 3 | `migrations/`、`web/` 放仓库根 | `internal/store/migrations/`、`internal/httpapi/web/` | `go:embed` 只能嵌入当前包目录内文件，放根目录无法编译 |
+| 4 | `GET /api/v1/shorten` → 405 | 需显式 `r.HandleMethodNotAllowed = true` | 默认该请求会落到 `NoRoute` 变成 404；开启后与 `/{code}` 区分清晰 |
+| 5 | 请求体类型错误 → `INVALID_URL` | `INVALID_REQUEST` | 与「URL 内容非法」区分，前端提示更准确 |
+| 6 | 号段初值 `start` | `start-1` | 计数器语义是「已分配到的最大号」，否则首个短码会跳过 `SEQ_START` 浪费 1 个号 |
+| 7 | 仅靠客户端超时配置 | 客户端收紧 + `LinkCache`/`idgen` 各加 500ms 硬上限 | 实测 Redis 停机时一次跳转被拖到 **19.6s** 并被 `WriteTimeout` 掐断（`curl 52 Empty reply`）。修复后：跳转 `302 / 1.0s`、创建 `0.5s` |
+| 8 | 「Redis 停机 → 创建必 503」 | 号段缓冲内仍可创建（实测 `201 / 0.5s`），号段耗尽才 `503`（实测 `0.5s`） | 号段预分配的固有特性，属预期行为；用 `SEGMENT_SIZE=1` 的独立实例验证了 503 分支 |
+| 9 | 每任务单独提交 | T5/T6 合并、T7 单独、API 与前端合并 | `go:embed` 与路由互相依赖，强行拆分会产生不可编译的中间提交 |
+| 10 | 全部测试带 `-race` | 本机无 gcc，改在 `golang:1.27-alpine` 容器内 `apk add gcc musl-dev` 后执行 | 容器内 `-race` 全绿；顺带发现并修正 `TestTTLJitterApplied` 断言（抖动上限是 1.1×TTL，原断言 `≤1h` 过严） |
+| 11 | 号段申请在锁内完成 | 双检查 + 独立 `fetchMu` + 1s 失败冷却 | **代码审查 Blocking**：原实现持锁做网络 I/O，Redis 故障且号段耗尽时 32 并发 ≈ 32×500ms=16s，超过 `WriteTimeout` 被掐断（`curl 52`）。修复后实测 32 并发全 503，总耗时 **511ms** |
+| 12 | `SETNX(key, start-1)` 初始化计数器 | Lua `EVAL`：`if cur < floor then SET` | Redis 从**陈旧 AOF** 恢复时计数器可能落后于库里 `MAX(seq)`，`SETNX` 不会修正 → 重发旧号 → 撞 `uk_seq`。Lua 保证只能抬升、绝不回退 |
+| 13 | 迁移固定执行 `0001_init.sql` | 遍历全部 `migrations/*.sql` 并按名排序执行 | 原来只跑第一个文件，后续新增迁移会被静默忽略（无 `schema_migrations` 表），与「变更必须新增迁移文件」的注释自相矛盾 |
+| 14 | 单一 `/healthz` | 拆 `/livez`（不碰依赖）与 `/healthz`（就绪，含依赖） | 原设计下 Redis 抖动会让容器 `unhealthy`，任何用 HTTP 探针做 liveness 的编排都会重启一个仍在正常跳转的进程 |
+| 15 | `testcontainers-go` 集成测试 | `//go:build integration` + `TEST_MYSQL_DSN`，在 compose 的 MySQL 上跑 | 已实测 6 条全通过（含 1062→`ErrDuplicate`、空表 `MaxSeq`、长 URL 往返）；不额外引入 testcontainers 依赖 |
+| 16 | 日志含完整 URL | 只记 `url_len` | URL 的 query 常带 token / 一次性凭证，属日志侧敏感信息泄漏 |
+| 17 | 设计 §7 提到 CORS 中间件 | 未实现 | 同源单页部署，YAGNI |
+| 18 | — | 全仓库行尾统一 LF + `.gitattributes` | Windows 检出为 CRLF 时 `gofmt -l` 会把 24 个文件全部标红，掩盖真实格式问题；`scripts/verify.sh` 也会因 CRLF 在 Linux 下报错 |
+| 19 | 文档断言 `/:code` 与 `/api/v1/shorten` **冲突会 panic** | 文档改为「两者**不冲突**」，实测表见设计方案 §3.3 | **原假设错误**。实测 gin v1.10.0：`GET /:code` + `POST /api/v1/shorten`、`GET /:code` + `GET /healthz`、`GET /:code` + `GET /api/v1/shorten`、`GET /api/v1/shorten` + `GET /api/:id` 四种组合均注册成功。gin 的 patricia 树允许同层「静态兄弟 + 通配」，只有旧版 httprouter 才 panic |
+| 20 | 短码走 `NoRoute` 兜底 | 直接注册 `GET /:code` + `HEAD /:code`，`Redirect` 用 `c.Param("code")` 取参 | 既然不冲突，直连注册更直白：`POST /aB3c9F` 由框架给 405（而不是 404），支持 HEAD，且不必手工从 `URL.Path` 裁剪。`TestParamRouteCoexistsWithStaticRoutes` 改为在真实路由上断言「`/healthz` 未被困配遮蔽 + 合法短码走到跳转」，作为升级哨兵 |
+
+### 实测结论（`docker compose` + MySQL 8.4 + Redis 7）
+
+```
+== 1. 健康检查      {"mysql":"ok","redis":"ok","status":"ok"}
+== 2. 创建短链      code=673Fs2
+== 3. 跳转          location=https://example.com/a/very/long/path?x=1&y=2
+== 4. 非法 URL 被拒 400
+== 5. 不存在的短码  404
+== 6. API 路径不被吞 405
+== 7. 并发 1000 条  total=1000 created=1000 unique=1000
+== ALL PASSED
+```
+
+补充验证项：
+
+| 场景 | 结果 |
+|---|---|
+| 空值缓存 | `link:000000` TTL=60s，值空串 |
+| 缓存被删后回源 | `DEL` 后请求 → 302，TTL 回填约 24h |
+| 运行用户 | `uid=10001(app)`，非 root |
+| 镜像体积 | 28.3 MB |
+| `compose down` 后再 `up` | 数据保留（4218 行），旧短码仍 302 |
+| nginx profile | 经 `:80` 反代 302，`/healthz` 正常 |
+| 重启后发号 | 日志 `idgen ready start=103208 db_max_seq=103207`，不回退不撞码 |
+| Redis 停机 | `/healthz` 503（2s）、跳转仍 302（1s，降级直读 MySQL）、创建在号段缓冲内 201 |
+| 号段耗尽 + Redis 停机 | 单请求 503（0.5s）；**32 并发全 503，总耗时 511ms**（修复前 ≈16s） |
+| repo 集成测试 | 6 条全通过（唯一键 1062 归一、空表 `MaxSeq`、长中文 URL 往返） |
+| `go test -race ./internal/...`（容器内） | 全绿 |
+

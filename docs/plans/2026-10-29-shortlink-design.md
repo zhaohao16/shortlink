@@ -91,14 +91,33 @@ seq ──▶ mix32(seq) ──▶ (x + 2^32) mod 62^6 ──▶ base62 ──�
 
 示例（seq = 100000 → 某个固定结果，测试用例固化该映射，防止算法被误改）。
 
-### 3.3 路由：短码走 `NoRoute` 兜底
+### 3.3 路由：短码直连根路径 `/:code`
 
-Gin 的 radix 树中 `/{code}` 通配与 `/api/v1/shorten` 静态路径**冲突会 panic**。两个选择：
+**结论先说**：`/:code` 与 `/api/v1/shorten` **不冲突**。实测 gin v1.10.0，以下四种组合注册时全部不 panic：
 
-| 方案 | 评价 |
+| 组合 | 结果 |
 |---|---|
-| **`GET /{code}` 用 `engine.NoRoute` 兜底（选定）** | 短链是最短形态 `http://host/aB3c9F`；`NoRoute` 中校验路径是否为 6 位 base62，是则跳转，否则 404 |
-| 短码加前缀 `/s/{code}` | 零歧义，但短链变长、观感差 |
+| `GET /:code` + `POST /api/v1/shorten` | 注册成功 |
+| `GET /:code` + `GET /healthz` | 注册成功，静态路径优先匹配 |
+| `GET /:code` + `GET /api/v1/shorten`（同 GET 树） | 注册成功 |
+| `GET /api/v1/shorten` + `GET /api/:id`（同层静态兄弟 + 通配） | 注册成功 |
+
+（gin 的 patricia 树对同层"静态兄弟 + 通配"是允许的，旧版 httprouter 才会 panic。）
+
+因此两种方案都可行，实际差异只在细节：
+
+| 请求 | `GET /:code` 直接注册（**选定**） | `NoRoute` 兜底 |
+|---|---|---|
+| `GET /aB3c9F` | 302 跳转 | 同 |
+| `GET /api/v1/shorten` | 405 | 405 |
+| `POST /aB3c9F` | 405 | 404 |
+| `GET /api`（单段） | 命中 `:code`，格式校验失败 → 404 | 同 |
+| `GET /a/b`（多段） | 404 | 404 |
+| 路由表形态 | 含一个通配段 | 全静态 |
+
+选定**直接注册**：方法不匹配时由框架给出语义正确的 405（`POST /aB3c9F` 而不是 404），跳转处理器可以直接用 `c.Param("code")` 取参，无需从 `URL.Path` 手工裁剪；同时支持 `HEAD`（对爬虫/预检友好）。
+
+静态路径优先于通配这一点依赖 gin 的实现，因此用 `TestParamRouteCoexistsWithStaticRoutes` 固化：`/healthz` 必须仍命中健康检查、合法短码必须仍走跳转，升级 gin 后若前提变化会先失败。路径格式校验（6 位 base62）仍由 `Redirect` 承担，作为第二道闸门——即使将来误加通配，非短码路径也不会被当作链接解析。
 
 ### 3.4 前端：`go:embed` 单页
 
@@ -180,10 +199,11 @@ GET /{code}
 ### 5.3 健康检查
 
 ```
-GET /healthz   → 200 {"status":"ok","mysql":"ok","redis":"ok"}
+GET /healthz   → 200 {"status":"ok","mysql":"ok","redis":"ok"}   就绪探针，含依赖
+GET /livez     → 200 {"status":"ok"}                            存活探针，不碰依赖
 ```
 
-任一依赖异常返回 `503`，供 compose `healthcheck` 使用。
+`/healthz` 任一依赖异常返回 `503`，供 compose `healthcheck` 使用；`/livez` 恒 200，供编排做 liveness，避免 Redis 抖动时重启一个仍在正常跳转的进程。
 
 ### 5.4 首页
 
@@ -224,7 +244,7 @@ shortlink/
 ├── cmd/server/main.go              # 装配：config → logger → db → redis → idgen → router
 ├── internal/
 │   ├── config/config.go            # 环境变量解析与校验
-│   ├── httpapi/router.go           # Gin 路由 + NoRoute 兜底
+│   ├── httpapi/router.go           # Gin 路由（静态路径 + 短码 /:code）
 │   ├── httpapi/link_handler.go     # 两个接口的入参校验与响应
 │   ├── httpapi/middleware.go       # 请求日志、panic recover、CORS
 │   ├── service/link.go             # 编排：取号 → 生成短码 → 落库 → 写缓存
@@ -254,7 +274,7 @@ shortlink/
 | `BASE_URL` | `http://localhost:8080` | 拼装 `short_url` 用 |
 | `DB_DSN` | — | 必填 |
 | `REDIS_ADDR` | `localhost:6379` | |
-| `CACHE_TTL` | `24h` | 链接缓存 TTL |
+| `CACHE_TTL_SECONDS` | `86400` | 链接缓存 TTL（带 ±10% 抖动） |
 | `SEGMENT_SIZE` | `1000` | 号段大小 |
 | `SEQ_START` | `100000` | 空库时的起始序列 |
 
@@ -339,7 +359,7 @@ ENTRYPOINT ["server"]
 | 场景 | 行为 |
 |---|---|
 | URL 非法 | `400`，不触碰任何依赖 |
-| Redis 取号失败 | `503 SERVICE_UNAVAILABLE`（唯一性依赖发号，不可降级） |
+| Redis 取号失败 | `503 SERVICE_UNAVAILABLE`（唯一性依赖发号，不可降级）。注意号段预分配的固有特性：号段缓冲未耗尽时创建仍可成功，耗尽后才 503 |
 | MySQL 唯一键冲突 | 重新取号，最多 3 次，仍失败则 `500` |
 | 跳转时 Redis 故障 | 降级直读 MySQL，正常 302 |
 | 短码不存在 | 404 + 空值缓存 60s |
