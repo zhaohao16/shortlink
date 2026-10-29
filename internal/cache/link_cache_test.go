@@ -59,9 +59,11 @@ func TestTTLJitterApplied(t *testing.T) {
 	if err := c.Set(context.Background(), "aB3c9F", "https://example.com"); err != nil {
 		t.Fatal(err)
 	}
+	// 抖动范围是 ±10%，因此上限是 1.1 × TTL
+	maxTTL := time.Hour + time.Hour/10
 	ttl := mr.TTL("link:aB3c9F")
-	if ttl <= 0 || ttl > time.Hour {
-		t.Fatalf("ttl = %v, want 0 < ttl <= 1h", ttl)
+	if ttl <= 0 || ttl > maxTTL {
+		t.Fatalf("ttl = %v, want 0 < ttl <= %v", ttl, maxTTL)
 	}
 }
 

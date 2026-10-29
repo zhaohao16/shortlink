@@ -15,13 +15,19 @@ const (
 
 // OpenRedis 建立客户端，并在启动期做有限次重试。
 func OpenRedis(ctx context.Context, addr string) (*redis.Client, error) {
-	rdb := redis.NewClient(&redis.Options{
-		Addr:         addr,
-		DialTimeout:  3 * time.Second,
-		ReadTimeout:  time.Second,
-		WriteTimeout: time.Second,
-		PoolSize:     100,
-	})
+rdb := redis.NewClient(&redis.Options{
+	Addr: addr,
+	// 缓存是可选依赖：超时必须短、重试必须少，
+	// 否则 Redis 故障时一次请求会被拖到数秒，超过 HTTP WriteTimeout。
+	DialTimeout:  1 * time.Second,
+	ReadTimeout:  800 * time.Millisecond,
+	WriteTimeout: 800 * time.Millisecond,
+	PoolTimeout:  1 * time.Second,
+	MaxRetries:   1,
+	// 让 context 截止时间真正中断拨号/读写
+	ContextTimeoutEnabled: true,
+	PoolSize:              100,
+})
 
 	var lastErr error
 	for i := 0; i < redisPingAttempts; i++ {

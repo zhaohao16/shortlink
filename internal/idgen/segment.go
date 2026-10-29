@@ -4,12 +4,16 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
 // DefaultStep 是默认号段大小。
 const DefaultStep = 1000
+
+// fetchTimeout 是向 Redis 申请新号段的时间上限，避免 Redis 故障时请求被长时间挂起。
+const fetchTimeout = 500 * time.Millisecond
 
 // Generator 号段发号器：每次向 Redis 申请 step 个号，进程内消费完再申请。
 // 进程重启会丢弃当前号段剩余部分，只浪费号，不会重发已用过的号。
@@ -45,7 +49,10 @@ func (g *Generator) Next(ctx context.Context) (uint64, error) {
 	defer g.mu.Unlock()
 
 	if g.cur >= g.max {
-		end, err := g.rdb.IncrBy(ctx, g.key, int64(g.step)).Result()
+		// 号段内取号不走网络；只有号段耗尽才需要访问 Redis，这里给它一个硬上限。
+		fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+		end, err := g.rdb.IncrBy(fetchCtx, g.key, int64(g.step)).Result()
+		cancel()
 		if err != nil {
 			return 0, fmt.Errorf("idgen: fetch segment: %w", err)
 		}
