@@ -180,10 +180,11 @@ GET /{code}
 ### 5.3 健康检查
 
 ```
-GET /healthz   → 200 {"status":"ok","mysql":"ok","redis":"ok"}
+GET /healthz   → 200 {"status":"ok","mysql":"ok","redis":"ok"}   就绪探针，含依赖
+GET /livez     → 200 {"status":"ok"}                            存活探针，不碰依赖
 ```
 
-任一依赖异常返回 `503`，供 compose `healthcheck` 使用。
+`/healthz` 任一依赖异常返回 `503`，供 compose `healthcheck` 使用；`/livez` 恒 200，供编排做 liveness，避免 Redis 抖动时重启一个仍在正常跳转的进程。
 
 ### 5.4 首页
 
@@ -254,7 +255,7 @@ shortlink/
 | `BASE_URL` | `http://localhost:8080` | 拼装 `short_url` 用 |
 | `DB_DSN` | — | 必填 |
 | `REDIS_ADDR` | `localhost:6379` | |
-| `CACHE_TTL` | `24h` | 链接缓存 TTL |
+| `CACHE_TTL_SECONDS` | `86400` | 链接缓存 TTL（带 ±10% 抖动） |
 | `SEGMENT_SIZE` | `1000` | 号段大小 |
 | `SEQ_START` | `100000` | 空库时的起始序列 |
 
@@ -339,7 +340,7 @@ ENTRYPOINT ["server"]
 | 场景 | 行为 |
 |---|---|
 | URL 非法 | `400`，不触碰任何依赖 |
-| Redis 取号失败 | `503 SERVICE_UNAVAILABLE`（唯一性依赖发号，不可降级） |
+| Redis 取号失败 | `503 SERVICE_UNAVAILABLE`（唯一性依赖发号，不可降级）。注意号段预分配的固有特性：号段缓冲未耗尽时创建仍可成功，耗尽后才 503 |
 | MySQL 唯一键冲突 | 重新取号，最多 3 次，仍失败则 `500` |
 | 跳转时 Redis 故障 | 降级直读 MySQL，正常 302 |
 | 短码不存在 | 404 + 空值缓存 60s |

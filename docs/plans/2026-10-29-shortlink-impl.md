@@ -2130,6 +2130,14 @@ git add scripts README.md && git commit -m "test: 端到端验收脚本与使用
 | 8 | 「Redis 停机 → 创建必 503」 | 号段缓冲内仍可创建（实测 `201 / 0.5s`），号段耗尽才 `503`（实测 `0.5s`） | 号段预分配的固有特性，属预期行为；用 `SEGMENT_SIZE=1` 的独立实例验证了 503 分支 |
 | 9 | 每任务单独提交 | T5/T6 合并、T7 单独、API 与前端合并 | `go:embed` 与路由互相依赖，强行拆分会产生不可编译的中间提交 |
 | 10 | 全部测试带 `-race` | 本机无 gcc，改在 `golang:1.27-alpine` 容器内 `apk add gcc musl-dev` 后执行 | 容器内 `-race` 全绿；顺带发现并修正 `TestTTLJitterApplied` 断言（抖动上限是 1.1×TTL，原断言 `≤1h` 过严） |
+| 11 | 号段申请在锁内完成 | 双检查 + 独立 `fetchMu` + 1s 失败冷却 | **代码审查 Blocking**：原实现持锁做网络 I/O，Redis 故障且号段耗尽时 32 并发 ≈ 32×500ms=16s，超过 `WriteTimeout` 被掐断（`curl 52`）。修复后实测 32 并发全 503，总耗时 **511ms** |
+| 12 | `SETNX(key, start-1)` 初始化计数器 | Lua `EVAL`：`if cur < floor then SET` | Redis 从**陈旧 AOF** 恢复时计数器可能落后于库里 `MAX(seq)`，`SETNX` 不会修正 → 重发旧号 → 撞 `uk_seq`。Lua 保证只能抬升、绝不回退 |
+| 13 | 迁移固定执行 `0001_init.sql` | 遍历全部 `migrations/*.sql` 并按名排序执行 | 原来只跑第一个文件，后续新增迁移会被静默忽略（无 `schema_migrations` 表），与「变更必须新增迁移文件」的注释自相矛盾 |
+| 14 | 单一 `/healthz` | 拆 `/livez`（不碰依赖）与 `/healthz`（就绪，含依赖） | 原设计下 Redis 抖动会让容器 `unhealthy`，任何用 HTTP 探针做 liveness 的编排都会重启一个仍在正常跳转的进程 |
+| 15 | `testcontainers-go` 集成测试 | `//go:build integration` + `TEST_MYSQL_DSN`，在 compose 的 MySQL 上跑 | 已实测 6 条全通过（含 1062→`ErrDuplicate`、空表 `MaxSeq`、长 URL 往返）；不额外引入 testcontainers 依赖 |
+| 16 | 日志含完整 URL | 只记 `url_len` | URL 的 query 常带 token / 一次性凭证，属日志侧敏感信息泄漏 |
+| 17 | 设计 §7 提到 CORS 中间件 | 未实现 | 同源单页部署，YAGNI |
+| 18 | — | 全仓库行尾统一 LF + `.gitattributes` | Windows 检出为 CRLF 时 `gofmt -l` 会把 24 个文件全部标红，掩盖真实格式问题；`scripts/verify.sh` 也会因 CRLF 在 Linux 下报错 |
 
 ### 实测结论（`docker compose` + MySQL 8.4 + Redis 7）
 
@@ -2155,4 +2163,8 @@ git add scripts README.md && git commit -m "test: 端到端验收脚本与使用
 | `compose down` 后再 `up` | 数据保留（4218 行），旧短码仍 302 |
 | nginx profile | 经 `:80` 反代 302，`/healthz` 正常 |
 | 重启后发号 | 日志 `idgen ready start=103208 db_max_seq=103207`，不回退不撞码 |
+| Redis 停机 | `/healthz` 503（2s）、跳转仍 302（1s，降级直读 MySQL）、创建在号段缓冲内 201 |
+| 号段耗尽 + Redis 停机 | 单请求 503（0.5s）；**32 并发全 503，总耗时 511ms**（修复前 ≈16s） |
+| repo 集成测试 | 6 条全通过（唯一键 1062 归一、空表 `MaxSeq`、长中文 URL 往返） |
+| `go test -race ./internal/...`（容器内） | 全绿 |
 
