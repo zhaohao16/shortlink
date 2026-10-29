@@ -93,12 +93,29 @@ seq ──▶ mix32(seq) ──▶ (x + 2^32) mod 62^6 ──▶ base62 ──�
 
 ### 3.3 路由：短码走 `NoRoute` 兜底
 
-Gin 的 radix 树中 `/{code}` 通配与 `/api/v1/shorten` 静态路径**冲突会 panic**。两个选择：
+**结论先说**：`/:code` 与 `/api/v1/shorten` **不冲突**。实测 gin v1.10.0，以下四种组合注册时全部不 panic：
 
-| 方案 | 评价 |
+| 组合 | 结果 |
 |---|---|
-| **`GET /{code}` 用 `engine.NoRoute` 兜底（选定）** | 短链是最短形态 `http://host/aB3c9F`；`NoRoute` 中校验路径是否为 6 位 base62，是则跳转，否则 404 |
-| 短码加前缀 `/s/{code}` | 零歧义，但短链变长、观感差 |
+| `GET /:code` + `POST /api/v1/shorten` | 注册成功 |
+| `GET /:code` + `GET /healthz` | 注册成功，静态路径优先匹配 |
+| `GET /:code` + `GET /api/v1/shorten`（同 GET 树） | 注册成功 |
+| `GET /api/v1/shorten` + `GET /api/:id`（同层静态兄弟 + 通配） | 注册成功 |
+
+（gin 的 patricia 树对同层"静态兄弟 + 通配"是允许的，旧版 httprouter 才会 panic。）
+
+因此两种方案都可行，实际差异只在细节：
+
+| 请求 | `GET /:code` 直接注册 | `NoRoute` 兜底（选定） |
+|---|---|---|
+| `GET /aB3c9F` | 200/302 跳转 | 同 |
+| `GET /api/v1/shorten` | 405 | 405 |
+| `POST /aB3c9F` | 405 | 404 |
+| `GET /api`（单段） | 命中 `:code`，格式校验失败 → 404 | 同 |
+| `GET /a/b`（多段） | 404 | 404 |
+| 路由表形态 | 含一个通配段 | 全静态 |
+
+选定 `NoRoute` 的理由是**可维护性而非避坑**：路由表全静态可一眼看完，新增任何静态路由都不会被通配段遮蔽；短码的格式校验与方法限制集中在 fallback 一处，不依赖"静态优先于通配"这一实现细节。代价是 `POST /aB3c9F` 返回 404 而不是 405（可接受：短码只服务于 GET 跳转）。
 
 ### 3.4 前端：`go:embed` 单页
 

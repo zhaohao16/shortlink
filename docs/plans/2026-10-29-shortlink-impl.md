@@ -1452,7 +1452,9 @@ func TestRedirectAndRouteConflicts(t *testing.T) {
 }
 ```
 
-2. 运行：预期 `panic: 'api' in new path '/api/v1/shorten' conflicts with existing wildcard ':code'` —— **如果你先用了 `r.GET("/:code")`，这一步就是冲突的实证**。改为 NoRoute 后重跑通过。
+2. 运行：**不会 panic**。实测 gin v1.10.0，`GET /:code` 与 `POST /api/v1/shorten` 可以共存，静态路径优先匹配。
+
+> 订正：本计划初稿断言此处会因 wildcard 冲突 panic，该断言在 gin v1.10 上**不成立**（gin 的 patricia 树允许同层「静态兄弟 + 通配」，只有旧的 httprouter 才会 panic）。方案仍选 `NoRoute`，但理由改为可维护性而非避坑，详见设计方案 §3.3 的实测对照表。
 
 3. 在 `router.go` 用 `NoRoute` 兜底，并**不注册** `/:code`：
 
@@ -1500,8 +1502,8 @@ func shortcodeFallback(h *LinkHandler) gin.HandlerFunc {
 
 | 编号 | 操作 | 预期 |
 |---|---|---|
-| V9.1 | 用 `r.GET("/:code")` 先跑一次 | 进程 panic 提示 wildcard 冲突（记录为冲突实证，随后改 NoRoute） |
-| V9.2 | 改 NoRoute 后 `go test ./internal/httpapi/ -run TestRedirect -v` | 6 个子测试全 PASS |
+| V9.1 | 单独用 `r.GET("/:code")` 注册一次 | 注册成功、不 panic；`GET /healthz` 命中静态、`GET /aB3c9F` 命中通配——二者可共存（初稿的"会 panic"假设已被实测推翻） |
+| V9.2 | `go test ./internal/httpapi/ -run TestRedirect -v` | 全部子测试 PASS（含单段 `/api`、多段 `/a/b` 均为 404） |
 | V9.3 | `curl -sSI localhost:8080/<code>` | `HTTP/1.1 302 Found`，`Location:` 为原 URL，含 `Cache-Control: no-store` |
 | V9.4 | `curl -sS -o /dev/null -w '%{http_code}' localhost:8080/api/v1/shorten` | `405`（GET 打 POST 路由），**不是 404**，证明 API 未被短码吞掉 |
 | V9.5 | `curl -sS -o /dev/null -w '%{http_code}' localhost:8080/healthz` | `200` |
@@ -2138,6 +2140,7 @@ git add scripts README.md && git commit -m "test: 端到端验收脚本与使用
 | 16 | 日志含完整 URL | 只记 `url_len` | URL 的 query 常带 token / 一次性凭证，属日志侧敏感信息泄漏 |
 | 17 | 设计 §7 提到 CORS 中间件 | 未实现 | 同源单页部署，YAGNI |
 | 18 | — | 全仓库行尾统一 LF + `.gitattributes` | Windows 检出为 CRLF 时 `gofmt -l` 会把 24 个文件全部标红，掩盖真实格式问题；`scripts/verify.sh` 也会因 CRLF 在 Linux 下报错 |
+| 19 | 文档断言 `/:code` 与 `/api/v1/shorten` **冲突会 panic** | 文档改为「两者**不冲突**」，实测表见设计方案 §3.3 | **原假设错误**。实测 gin v1.10.0：`GET /:code` + `POST /api/v1/shorten`、`GET /:code` + `GET /healthz`、`GET /:code` + `GET /api/v1/shorten`、`GET /api/v1/shorten` + `GET /api/:id` 四种组合均注册成功。gin 的 patricia 树允许同层「静态兄弟 + 通配」，只有旧版 httprouter 才 panic。方案仍保留 `NoRoute`，但理由改为「路由表全静态、fallback 逻辑集中」，并补 `TestParamRouteCoexistsWithStaticRoutes` 作哨兵 |
 
 ### 实测结论（`docker compose` + MySQL 8.4 + Redis 7）
 

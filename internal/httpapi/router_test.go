@@ -174,6 +174,10 @@ func TestRedirectAndRouteConflicts(t *testing.T) {
 		{"不存在的短码", http.MethodGet, "/000000", http.StatusNotFound, ""},
 		{"API 不被短码吞掉", http.MethodGet, "/api/v1/shorten", http.StatusMethodNotAllowed, ""},
 		{"非 GET 打短码路径", http.MethodPost, "/" + code, http.StatusNotFound, ""},
+		// 单段/多段非法路径必须 404，不能被 fallback 误判成短码
+		{"单段非短码", http.MethodGet, "/api", http.StatusNotFound, ""},
+		{"多段路径", http.MethodGet, "/api/v1", http.StatusNotFound, ""},
+		{"有效短码后接路径", http.MethodGet, "/aB3c9F/extra", http.StatusNotFound, ""},
 		{"健康检查不被吞掉", http.MethodGet, "/healthz", http.StatusOK, ""},
 		{"存活探针", http.MethodGet, "/livez", http.StatusOK, ""},
 		{"favicon 不产生 404", http.MethodGet, "/favicon.ico", http.StatusNoContent, ""},
@@ -190,6 +194,29 @@ func TestRedirectAndRouteConflicts(t *testing.T) {
 				t.Fatalf("Location = %q, want %q", w.Header().Get("Location"), tc.wantLoc)
 			}
 		})
+	}
+}
+
+// TestParamRouteCoexistsWithStaticRoutes 固化一条被实测推翻过的假设：
+// gin v1.10 允许 GET /:code 与 /api/v1/shorten、/healthz 共存（静态优先），注册时不会 panic。
+// 本实现最终没注册 /:code（走 NoRoute），这里用独立 engine 当哨兵：
+// 若未来升级 gin 后该前提不再成立，这条测试会先失败，而不是等到线上 panic。
+func TestParamRouteCoexistsWithStaticRoutes(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("gin now panics on /:code + static routes: %v", r)
+		}
+	}()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/:code", func(c *gin.Context) { c.String(http.StatusOK, "code") })
+	r.POST("/api/v1/shorten", func(c *gin.Context) { c.String(http.StatusCreated, "ok") })
+	r.GET("/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if w.Code != http.StatusOK || w.Body.String() != "ok" {
+		t.Fatalf("static route shadowed by :code: %d %q", w.Code, w.Body.String())
 	}
 }
 
