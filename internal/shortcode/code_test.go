@@ -96,6 +96,14 @@ func TestDecodeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDecodeRejectsOutOfRange(t *testing.T) {
+	// "zzzzzz" 解出来大于 codeOffset+2^32，属于不可能是本系统生成的值，
+	// 必须报错而不是静默截断成垃圾 seq。
+	if _, err := Decode("zzzzzz"); err == nil {
+		t.Fatal("want error for out-of-range code")
+	}
+}
+
 func TestIsValidCode(t *testing.T) {
 	good := []string{"aB3c9F", "000000", "zzzzzz"}
 	bad := []string{"", "abcde", "abcdefg", "aB3c9-", "aB3c9!", "../api", "aB3c9/"}

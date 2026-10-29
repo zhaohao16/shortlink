@@ -33,7 +33,7 @@ func Decode(code string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if n < codeOffset {
+	if n < codeOffset || n >= codeOffset+1<<32 {
 		return 0, errors.New("shortcode: code out of range")
 	}
 	return uint64(Unmix32(uint32(n - codeOffset))), nil
