@@ -1,0 +1,18 @@
+# 构建产物
+/server
+/server.exe
+/bin/
+/dist/
+
+# 本地环境
+.env
+*.local
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+
+# 系统
+.DS_Store
+Thumbs.db
