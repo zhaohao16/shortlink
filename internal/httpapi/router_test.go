@@ -173,7 +173,7 @@ func TestRedirectAndRouteConflicts(t *testing.T) {
 		{"含非法字符", http.MethodGet, "/abc-12", http.StatusNotFound, ""},
 		{"不存在的短码", http.MethodGet, "/000000", http.StatusNotFound, ""},
 		{"API 不被短码吞掉", http.MethodGet, "/api/v1/shorten", http.StatusMethodNotAllowed, ""},
-		{"非 GET 打短码路径", http.MethodPost, "/" + code, http.StatusNotFound, ""},
+		{"非 GET 打短码路径", http.MethodPost, "/" + code, http.StatusMethodNotAllowed, ""},
 		// 单段/多段非法路径必须 404，不能被 fallback 误判成短码
 		{"单段非短码", http.MethodGet, "/api", http.StatusNotFound, ""},
 		{"多段路径", http.MethodGet, "/api/v1", http.StatusNotFound, ""},
@@ -197,26 +197,30 @@ func TestRedirectAndRouteConflicts(t *testing.T) {
 	}
 }
 
-// TestParamRouteCoexistsWithStaticRoutes 固化一条被实测推翻过的假设：
-// gin v1.10 允许 GET /:code 与 /api/v1/shorten、/healthz 共存（静态优先），注册时不会 panic。
-// 本实现最终没注册 /:code（走 NoRoute），这里用独立 engine 当哨兵：
-// 若未来升级 gin 后该前提不再成立，这条测试会先失败，而不是等到线上 panic。
+// TestParamRouteCoexistsWithStaticRoutes 是升级哨兵：
+// 生产路由里 /:code 与 /api/v1/shorten、/healthz、/ 共存，
+// 若未来升级 gin 后「静态优先于通配」不再成立，这条测试会先失败而不是线上 panic。
 func TestParamRouteCoexistsWithStaticRoutes(t *testing.T) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("gin now panics on /:code + static routes: %v", r)
-		}
-	}()
-	gin.SetMode(gin.TestMode)
-	r := gin.New()
-	r.GET("/:code", func(c *gin.Context) { c.String(http.StatusOK, "code") })
-	r.POST("/api/v1/shorten", func(c *gin.Context) { c.String(http.StatusCreated, "ok") })
-	r.GET("/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
+	r, _ := testRouter(t)
 
-	w := httptest.NewRecorder()
+	w := postJSON(r, "/api/v1/shorten", `{"url":"https://example.com/coexist"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create status %d body %s", w.Code, w.Body)
+	}
+	code := extractCode(t, w.Body.Bytes())
+
+	// 1. 静态路径仍由原处理器接管，未被 :code 遮蔽
+	w = httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-	if w.Code != http.StatusOK || w.Body.String() != "ok" {
-		t.Fatalf("static route shadowed by :code: %d %q", w.Code, w.Body.String())
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"mysql"`) {
+		t.Fatalf("/healthz shadowed by :code: %d %q", w.Code, w.Body.String())
+	}
+
+	// 2. 单段合法短码走跳转处理器
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/"+code, nil))
+	if w.Code != http.StatusFound || w.Header().Get("Location") != "https://example.com/coexist" {
+		t.Fatalf("shortcode route: %d Location=%q", w.Code, w.Header().Get("Location"))
 	}
 }
 

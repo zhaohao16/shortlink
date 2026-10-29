@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -79,7 +78,7 @@ func (h *LinkHandler) Create(c *gin.Context) {
 
 // Redirect 处理短码跳转。仅当路径是合法 6 位短码时才查询，其余一律 404。
 func (h *LinkHandler) Redirect(c *gin.Context) {
-	code := strings.TrimPrefix(c.Request.URL.Path, "/")
+	code := c.Param("code")
 	if !shortcode.IsValidCode(code) {
 		c.String(http.StatusNotFound, "404 page not found")
 		return
@@ -99,16 +98,4 @@ func (h *LinkHandler) Redirect(c *gin.Context) {
 	// 不缓存 302，保证后续统计/失效能力不被浏览器缓存绕过。
 	c.Header("Cache-Control", "no-store")
 	c.Redirect(http.StatusFound, url)
-}
-
-// shortcodeFallback 只被未匹配任何路由的请求触发，
-// 因此 /api/v1/shorten、/healthz、/ 天然优先，不存在 gin 通配冲突。
-func shortcodeFallback(h *LinkHandler) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
-			c.String(http.StatusNotFound, "404 page not found")
-			return
-		}
-		h.Redirect(c)
-	}
 }

@@ -91,7 +91,7 @@ seq ──▶ mix32(seq) ──▶ (x + 2^32) mod 62^6 ──▶ base62 ──�
 
 示例（seq = 100000 → 某个固定结果，测试用例固化该映射，防止算法被误改）。
 
-### 3.3 路由：短码走 `NoRoute` 兜底
+### 3.3 路由：短码直连根路径 `/:code`
 
 **结论先说**：`/:code` 与 `/api/v1/shorten` **不冲突**。实测 gin v1.10.0，以下四种组合注册时全部不 panic：
 
@@ -106,16 +106,18 @@ seq ──▶ mix32(seq) ──▶ (x + 2^32) mod 62^6 ──▶ base62 ──�
 
 因此两种方案都可行，实际差异只在细节：
 
-| 请求 | `GET /:code` 直接注册 | `NoRoute` 兜底（选定） |
+| 请求 | `GET /:code` 直接注册（**选定**） | `NoRoute` 兜底 |
 |---|---|---|
-| `GET /aB3c9F` | 200/302 跳转 | 同 |
+| `GET /aB3c9F` | 302 跳转 | 同 |
 | `GET /api/v1/shorten` | 405 | 405 |
 | `POST /aB3c9F` | 405 | 404 |
 | `GET /api`（单段） | 命中 `:code`，格式校验失败 → 404 | 同 |
 | `GET /a/b`（多段） | 404 | 404 |
 | 路由表形态 | 含一个通配段 | 全静态 |
 
-选定 `NoRoute` 的理由是**可维护性而非避坑**：路由表全静态可一眼看完，新增任何静态路由都不会被通配段遮蔽；短码的格式校验与方法限制集中在 fallback 一处，不依赖"静态优先于通配"这一实现细节。代价是 `POST /aB3c9F` 返回 404 而不是 405（可接受：短码只服务于 GET 跳转）。
+选定**直接注册**：方法不匹配时由框架给出语义正确的 405（`POST /aB3c9F` 而不是 404），跳转处理器可以直接用 `c.Param("code")` 取参，无需从 `URL.Path` 手工裁剪；同时支持 `HEAD`（对爬虫/预检友好）。
+
+静态路径优先于通配这一点依赖 gin 的实现，因此用 `TestParamRouteCoexistsWithStaticRoutes` 固化：`/healthz` 必须仍命中健康检查、合法短码必须仍走跳转，升级 gin 后若前提变化会先失败。路径格式校验（6 位 base62）仍由 `Redirect` 承担，作为第二道闸门——即使将来误加通配，非短码路径也不会被当作链接解析。
 
 ### 3.4 前端：`go:embed` 单页
 
@@ -242,7 +244,7 @@ shortlink/
 ├── cmd/server/main.go              # 装配：config → logger → db → redis → idgen → router
 ├── internal/
 │   ├── config/config.go            # 环境变量解析与校验
-│   ├── httpapi/router.go           # Gin 路由 + NoRoute 兜底
+│   ├── httpapi/router.go           # Gin 路由（静态路径 + 短码 /:code）
 │   ├── httpapi/link_handler.go     # 两个接口的入参校验与响应
 │   ├── httpapi/middleware.go       # 请求日志、panic recover、CORS
 │   ├── service/link.go             # 编排：取号 → 生成短码 → 落库 → 写缓存

@@ -1390,7 +1390,9 @@ git add internal/httpapi && git commit -m "feat(api): 创建短链接口与统�
 
 ---
 
-## T9 跳转接口（NoRoute 兜底）
+## T9 跳转接口（短码 `GET /:code`）
+
+> 实施时由「`NoRoute` 兜底」改为「直接注册 `GET /:code` + `HEAD /:code`」，见偏差记录第 20 条。
 
 **产出文件**
 - Modify: `internal/httpapi/link_handler.go`、`internal/httpapi/router.go`
@@ -2140,7 +2142,8 @@ git add scripts README.md && git commit -m "test: 端到端验收脚本与使用
 | 16 | 日志含完整 URL | 只记 `url_len` | URL 的 query 常带 token / 一次性凭证，属日志侧敏感信息泄漏 |
 | 17 | 设计 §7 提到 CORS 中间件 | 未实现 | 同源单页部署，YAGNI |
 | 18 | — | 全仓库行尾统一 LF + `.gitattributes` | Windows 检出为 CRLF 时 `gofmt -l` 会把 24 个文件全部标红，掩盖真实格式问题；`scripts/verify.sh` 也会因 CRLF 在 Linux 下报错 |
-| 19 | 文档断言 `/:code` 与 `/api/v1/shorten` **冲突会 panic** | 文档改为「两者**不冲突**」，实测表见设计方案 §3.3 | **原假设错误**。实测 gin v1.10.0：`GET /:code` + `POST /api/v1/shorten`、`GET /:code` + `GET /healthz`、`GET /:code` + `GET /api/v1/shorten`、`GET /api/v1/shorten` + `GET /api/:id` 四种组合均注册成功。gin 的 patricia 树允许同层「静态兄弟 + 通配」，只有旧版 httprouter 才 panic。方案仍保留 `NoRoute`，但理由改为「路由表全静态、fallback 逻辑集中」，并补 `TestParamRouteCoexistsWithStaticRoutes` 作哨兵 |
+| 19 | 文档断言 `/:code` 与 `/api/v1/shorten` **冲突会 panic** | 文档改为「两者**不冲突**」，实测表见设计方案 §3.3 | **原假设错误**。实测 gin v1.10.0：`GET /:code` + `POST /api/v1/shorten`、`GET /:code` + `GET /healthz`、`GET /:code` + `GET /api/v1/shorten`、`GET /api/v1/shorten` + `GET /api/:id` 四种组合均注册成功。gin 的 patricia 树允许同层「静态兄弟 + 通配」，只有旧版 httprouter 才 panic |
+| 20 | 短码走 `NoRoute` 兜底 | 直接注册 `GET /:code` + `HEAD /:code`，`Redirect` 用 `c.Param("code")` 取参 | 既然不冲突，直连注册更直白：`POST /aB3c9F` 由框架给 405（而不是 404），支持 HEAD，且不必手工从 `URL.Path` 裁剪。`TestParamRouteCoexistsWithStaticRoutes` 改为在真实路由上断言「`/healthz` 未被困配遮蔽 + 合法短码走到跳转」，作为升级哨兵 |
 
 ### 实测结论（`docker compose` + MySQL 8.4 + Redis 7）
 
